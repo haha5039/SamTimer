@@ -9,12 +9,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Shizuku UserService: runs the CVE-2026-98260 timer exploit as the shell user.
  *
- * Chain (all verified on the target S24 / 6.1.162-android14-11):
+ * Chain (verified on SM-A566S / 6.6.127-android15-8):
  *  1. stage ksud from the APK (jniLibs/libksud.so) to /data/local/tmp/samtimer/ksud
  *  2. raise the tracefs buffer (the leak needs headroom)
  *  3. run libtimer.so in "umhpipe" mode: pipe_buffer kernel r/w primitive ->
- *     cred -> SELinux permissive -> uid=0 child -> bind-mount ksud over
- *     /system/bin/logcat (KDP bypass) -> ksud late-load -> KSU_LOADED
+ *     system_unbound_wq usermodehelper -> bind-mount ksud over
+ *     /system/bin/logcat (KDP bypass) -> KernelSU late-load -> KSU_LOADED
  *  4. failed-plant zombies are made reap-safe (their posix-cpu-timer queue
  *     leftmost pointers are zeroed through the write primitive) and reaped
  *     immediately, so the exploit exits cleanly with no zombie left and

