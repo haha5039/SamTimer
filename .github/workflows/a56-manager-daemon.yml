@@ -1,0 +1,83 @@
+name: Build A56 Manager compatible daemon
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout SamTimer
+        uses: actions/checkout@v7
+
+      - name: Checkout Samsung KernelSU patch source
+        uses: actions/checkout@v7
+        with:
+          repository: rushiranpise/Root-My-Galaxy-Payloads
+          ref: de1960f8b1ed8f131ba8309254b63bb66a169e69
+          path: payload-source
+
+      - name: Checkout KernelSU 3.2.5
+        uses: actions/checkout@v7
+        with:
+          repository: tiann/KernelSU
+          ref: b0bc817b4e966aa6aa830834eaf6ef765d821d40
+          fetch-depth: 0
+          fetch-tags: true
+          path: KernelSU
+
+      - name: Verify and stage the A56 module
+        run: |
+          printf '%s  %s\n' \
+            b6522b6ea039ffcd18d6126fa572b24ef072a8fd2ff41bfcfb25c84c1366345e \
+            app/src/main/jniLibs/arm64-v8a/libkernelsu.so | sha256sum -c -
+          mkdir -p KernelSU/userspace/ksud/bin/aarch64
+          cp app/src/main/jniLibs/arm64-v8a/libkernelsu.so \
+            KernelSU/userspace/ksud/bin/aarch64/android15-6.6_kernelsu.ko
+
+      - name: Apply Samsung KDP and RKP support
+        run: |
+          git -C KernelSU apply --check \
+            "$GITHUB_WORKSPACE/payload-source/kernelsu/patches/KernelSU-v3.2.5-samsung-kdp-rkp-defex.patch"
+          git -C KernelSU apply \
+            "$GITHUB_WORKSPACE/payload-source/kernelsu/patches/KernelSU-v3.2.5-samsung-kdp-rkp-defex.patch"
+          mapfile -t manifests < <(find KernelSU -name Cargo.toml -o -name Cargo.lock)
+          sed -i 's#github\.com/Kernel-SU/#github.com/KernelSU2/#g' "${manifests[@]}"
+
+      - name: Rust target and Android NDK
+        run: |
+          rustup target add aarch64-linux-android
+          curl -fsSLo /tmp/ndk.zip \
+            https://dl.google.com/android/repository/android-ndk-r28c-linux.zip
+          unzip -q /tmp/ndk.zip -d /tmp
+          echo 'ANDROID_NDK_HOME=/tmp/android-ndk-r28c' >> "$GITHUB_ENV"
+
+      - name: libclang for bindgen
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libclang-dev
+          clanglib=$(llvm-config --libdir 2>/dev/null || true)
+          if [ -z "$clanglib" ] || [ ! -e "$clanglib/libclang.so" ]; then
+            clanglib=$(dirname "$(find /usr/lib/llvm-* -name 'libclang.so*' -print -quit 2>/dev/null)")
+          fi
+          echo "LIBCLANG_PATH=$clanglib" >> "$GITHUB_ENV"
+
+      - name: Build daemon with embedded A56 module
+        run: |
+          python3 KernelSU/scripts/setup_cargo_config.py \
+            --ndk-root "$ANDROID_NDK_HOME" --force
+          export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          cd KernelSU
+          cargo build --release --locked --target aarch64-linux-android -p ksud
+          file target/aarch64-linux-android/release/ksud
+          sha256sum target/aarch64-linux-android/release/ksud
+
+      - name: Upload daemon
+        uses: actions/upload-artifact@v7
+        with:
+          name: ksud-a56-manager-v2.2
+          path: KernelSU/target/aarch64-linux-android/release/ksud
+          if-no-files-found: error
