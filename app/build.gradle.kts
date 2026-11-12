@@ -53,12 +53,15 @@ val buildPayload by tasks.registering(Exec::class) {
             ?: throw GradleException(
                 "NDK not found — set ANDROID_NDK_HOME or ndk.dir in local.properties"
             )
-        val cc = "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
-        if (!file(cc).exists()) throw GradleException("clang not found: $cc")
+        val prebuilt = file("$ndk/toolchains/llvm/prebuilt").listFiles()
+            ?.asSequence()
+            ?.map { file("${it.absolutePath}/bin/aarch64-linux-android34-clang") }
+            ?.firstOrNull { it.isFile }
+            ?: throw GradleException("Android clang not found under $ndk/toolchains/llvm/prebuilt")
         out.parentFile.mkdirs()
         logger.lifecycle("payload: $src -> $out")
         commandLine(
-            cc,
+            prebuilt.absolutePath,
             "-O2", "-std=gnu11", "-static",
             "-ffunction-sections", "-fdata-sections",
             src.absolutePath, "-o", out.absolutePath
