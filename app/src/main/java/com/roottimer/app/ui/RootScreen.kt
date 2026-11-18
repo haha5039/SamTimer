@@ -45,6 +45,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.roottimer.app.BuildConfig
 import com.roottimer.app.R
 
 /** One app-level status line: dot + label + colored text. */
@@ -119,7 +120,7 @@ fun RootScreen(
                         shape = RoundedCornerShape(50)
                     ) {
                         Text(
-                            "v1.1",
+                            "v${BuildConfig.VERSION_NAME}",
                             Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                             fontSize = 11.sp,
                             color = TextSecondary

@@ -1413,6 +1413,37 @@ static int verify_ksu_control(void)
     return 0;
 }
 
+/* GET_INFO alone also succeeds for a shell when the Manager has not been
+ * crowned. This root-only ioctl checks the actual Manager app id. */
+static int verify_ksu_manager(void)
+{
+    uint32_t appid = UINT32_MAX;
+    int fd = -1;
+    int ret;
+
+    if (geteuid() != 0)
+    {
+        logf("[-] Manager check requires root\n");
+        return 1;
+    }
+    syscall(SYS_reboot, 0xDEADBEEFUL, 0xCAFEBABEUL, 0, &fd);
+    if (fd < 0)
+    {
+        logf("[-] Manager check: driver fd unavailable\n");
+        return 1;
+    }
+    ret = ioctl(fd, _IOC(_IOC_READ, 'K', 10, 0), &appid);
+    close(fd);
+    if (ret != 0 || appid == UINT32_MAX || appid == 0)
+    {
+        logf("[-] Manager not registered (ioctl=%d appid=%u)\n", ret,
+             appid);
+        return 1;
+    }
+    logf("[+] KernelSU Manager registered (appid=%u)\n", appid);
+    return 0;
+}
+
 
 /*
  * UMH action script, run as "/system/bin/sh umh_action.sh" by the injected
@@ -1440,6 +1471,8 @@ static void write_umh_script(void)
         /* KSU's sepolicy only lets init reach the ksud domain */
         "echo -n u:r:init:s0 > /proc/self/attr/current 2>/dev/null\n"
         "unshare -m sh -c '\n"
+        "  mount -o rprivate none / || { echo private_mount_failed; exit 20; }\n"
+        "  trap \"umount /system/bin/logcat 2>/dev/null\" EXIT\n"
         "  cp -f /data/local/tmp/samtimer/ksud "
         "/data/local/tmp/.ksud-stage || { echo stage_copy_failed; exit 15; }\n"
         "  chmod 0755 /data/local/tmp/.ksud-stage\n"
@@ -3863,6 +3896,8 @@ int main(int argc, char **argv)
         return setksu_main();
     if (argc > 1 && !strcmp(argv[1], "ksucheck"))
         return verify_ksu_control();
+    if (argc > 1 && !strcmp(argv[1], "managercheck"))
+        return verify_ksu_manager();
 
     if (argc > 1 && !strcmp(argv[1], "shell"))
         shell_mode = 1;

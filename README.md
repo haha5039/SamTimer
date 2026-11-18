@@ -19,13 +19,12 @@ One-tap Android root for Samsung Galaxy devices, built around the
 | | |
 | --- | --- |
 | Exploit | CVE-2026-98260 (timer.c payload, built by Gradle) |
-| Root module | KernelSU 3.2.5 (`ksud-A566EXXSCCZG6-kdp`, android15-6.6 no-patch-text) |
+| Root module | KernelSU 3.2.5, A56 KDP/no-patch-text module with samsung-v2.2 Manager identity |
 | Execution context | Shizuku shell (uid 2000) |
 | su authorization | KernelSU manager (`me.weishu.kernelsu`), domain `u:r:ksu:s0` |
 | Root lifetime | Per-boot (ephemeral — cleared on reboot) |
 
-Tested on **SM-A566S** (a56x, Exynos 1580), firmware
-`A566SKSUADZJ1`, kernel `6.6.127-android15-8`, One UI 9.
+Target: **SM-A566S** (a56x, Exynos 1580), Android 15-based kernel 6.6.
 
 ## SM-A566S port
 
@@ -34,7 +33,7 @@ The target offsets were derived from the matching stock boot image's kallsyms,
 BTF, and ARM64 disassembly, then validated with the read-only `umhread` path
 before the KernelSU late-load run.
 
-The SM-A566S port and live validation were completed with **GPT-5.6 Sol**.
+The SM-A566S port was developed with **GPT-5.6 Sol**.
 
 ## Features
 
@@ -62,21 +61,33 @@ The SM-A566S port and live validation were completed with **GPT-5.6 Sol**.
 
 1. **Shizuku** running (wireless debugging). For auto-root: enable Shizuku's
    boot auto-start and grant its permission to SamTimer once.
-2. **KernelSU manager** (`me.weishu.kernelsu`) installed — su is only
-   granted to apps the manager authorizes.
+2. **KernelSU manager** (`me.weishu.kernelsu`) installed. This port targets
+   [diabl0w's samsung-v2.2 release](https://github.com/diabl0w/KernelSU/releases/tag/samsung-v2.2).
+   The kernel module still implements UAPI 2; Manager v2.2 implements UAPI 5
+   and may show an update requirement even after it recognizes the module.
 
 ## Build
 
 ```sh
+export SAMTIMER_SIGNING_CONFIG=private-signing-config.json
 ./gradlew assembleDebug
 # APK: app/build/outputs/apk/debug/app-debug.apk
 ```
+
+The private JSON config supplies `keystore`, `alias`, `store_password`,
+`key_password`, and `expected_certificate_sha256`. The build verifies the
+certificate and fails if the shared signing identity is unavailable.
 
 - `app/src/main/cpp/timer.c` is compiled into
   `app/src/main/jniLibs/arm64-v8a/libtimer.so` by the `buildPayload` task
   (NDK is auto-detected: `ANDROID_NDK_HOME` → `local.properties` → SDK →
   `~/android-ndk-r27c`)
-- `libksud.so` is the prebuilt A56 KernelSU 3.2.5 KDP late-load daemon
+- `libksud.so` is the prebuilt A56 KernelSU 3.2.5 KDP late-load daemon.
+- `kernel/a56-manager-v2.2.ko` derives from the A56 module that previously
+  loaded on this device, with its Manager certificate identity updated to
+  samsung-v2.2. The bounded
+  transformation lives in `tools/patch-a56-manager-identity.py`; the daemon
+  build embeds this module.
 - `./gradlew clean` removes all outputs **including** the generated payload
   (the prebuilt `libksud.so` is kept)
 
@@ -95,11 +106,12 @@ The SM-A566S port and live validation were completed with **GPT-5.6 Sol**.
    waits for a stable empty worklist, and queues a genuine kernel
    usermodehelper.
 3. The helper stages `.ksud-stage`, binds `ksud` over `/system/bin/logcat`
-   inside a private mount namespace, and runs
-   `late-load --allow-shell --package-name me.weishu.kernelsu`.
+   inside a private mount namespace and runs
+   `late-load --allow-shell --package-name me.weishu.kernelsu` with the
+   matching module embedded in the daemon.
 4. KernelSU 3.2.5 loads its android15-6.6 no-patch-text module and restores
    SELinux enforcing.
-5. Success is verified through the KSU driver's `reboot()` backdoor ioctl.
+5. Success requires both the KSU driver ioctl and a registered Manager app id.
 6. Failed-plant zombies are made reap-safe first — their posix-cpu-timer
    queue leftmost pointers are zeroed through the write primitive, so
    `posix_cpu_timers_exit` finds empty queues and the reap cannot touch the

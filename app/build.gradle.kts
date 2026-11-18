@@ -1,3 +1,7 @@
+import groovy.json.JsonSlurper
+import java.security.KeyStore
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -77,25 +81,51 @@ android {
         applicationId = "com.roottimer.app"
         minSdk = 31
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 7
+        versionName = "1.6"
     }
 
-    // Shared debug key: the repo ships the debug keystore so every build
-    // (CI artifact, local, anyone's machine) signs with the same
-    // identity and installs as an update over the previous one.  The
-    // standard debug credentials apply.
+    // Every APK variant uses the same private signing identity. A missing
+    // configuration or a certificate mismatch fails configuration before
+    // any APK is built; signing material is never stored in this repo.
     signingConfigs {
         getByName("debug") {
-            storeFile = rootProject.file("signing/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+            val expected = "fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c"
+            val configPath = System.getenv("SAMTIMER_SIGNING_CONFIG")
+                ?: throw GradleException("SAMTIMER_SIGNING_CONFIG is required for APK builds")
+            val config = runCatching {
+                JsonSlurper().parse(rootProject.file(configPath)) as Map<*, *>
+            }.getOrElse {
+                throw GradleException("Private signing configuration is unavailable")
+            }
+            fun required(name: String): String = config[name] as? String
+                ?: throw GradleException("Private signing configuration is incomplete")
+            val keyFile = file(required("keystore"))
+            val storeSecret = required("store_password")
+            val keySecret = required("key_password")
+            val alias = required("alias")
+            val digest = runCatching {
+                val ks = KeyStore.getInstance(keyFile, storeSecret.toCharArray())
+                val cert = ks.getCertificate(alias)
+                    ?: throw IllegalStateException("Certificate not found")
+                MessageDigest.getInstance("SHA-256").digest(cert.encoded)
+                    .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            }.getOrElse {
+                throw GradleException("Shared signing identity is unavailable")
+            }
+            if (config["expected_certificate_sha256"] != expected || digest != expected) {
+                throw GradleException("Shared signing certificate mismatch")
+            }
+            storeFile = keyFile
+            storePassword = storeSecret
+            keyAlias = alias
+            keyPassword = keySecret
         }
     }
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
@@ -109,6 +139,7 @@ android {
     buildFeatures {
         aidl = true
         compose = true
+        buildConfig = true
     }
     packaging {
         jniLibs {
