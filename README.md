@@ -24,7 +24,8 @@ One-tap Android root for Samsung Galaxy devices, built around the
 | su authorization | KernelSU manager (`me.weishu.kernelsu`), domain `u:r:ksu:s0` |
 | Root lifetime | Per-boot (ephemeral — cleared on reboot) |
 
-Target: **SM-A566S** (a56x, Exynos 1580), Android 15-based kernel 6.6.
+Tested on **SM-A566S** (a56x, Exynos 1580), firmware
+`A566SKSUADZJ1`, kernel `6.6.127-android15-8`, One UI 9.
 
 ## SM-A566S port
 
@@ -33,7 +34,7 @@ The target offsets were derived from the matching stock boot image's kallsyms,
 BTF, and ARM64 disassembly, then validated with the read-only `umhread` path
 before the KernelSU late-load run.
 
-The SM-A566S port was developed with **GPT-5.6 Sol**.
+The SM-A566S port and live validation were completed with **GPT-5.6 Sol**.
 
 ## Features
 
@@ -77,6 +78,8 @@ export SAMTIMER_SIGNING_CONFIG=private-signing-config.json
 The private JSON config supplies `keystore`, `alias`, `store_password`,
 `key_password`, and `expected_certificate_sha256`. The build verifies the
 certificate and fails if the shared signing identity is unavailable.
+The upstream public test key is preserved in `signing/debug.keystore`.
+APK builds still require the configured signing identity.
 
 - `app/src/main/cpp/timer.c` is compiled into
   `app/src/main/jniLibs/arm64-v8a/libtimer.so` by the `buildPayload` task

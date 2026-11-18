@@ -87,7 +87,8 @@ android {
 
     // Every APK variant uses the same private signing identity. A missing
     // configuration or a certificate mismatch fails configuration before
-    // any APK is built; signing material is never stored in this repo.
+    // any APK is built. The upstream public test key remains as a reference;
+    // private signing material is supplied externally.
     signingConfigs {
         getByName("debug") {
             val expected = "fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c"

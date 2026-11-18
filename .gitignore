@@ -17,6 +17,7 @@ app/.cxx/
 # 发布签名密钥（切勿提交）
 app/keystore/
 signing/*.keystore
+!signing/debug.keystore
 .local/
 app/src/main/jniLibs/arm64-v8a/libtimer.so
 
