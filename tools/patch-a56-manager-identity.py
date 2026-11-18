@@ -13,12 +13,13 @@ import struct
 from pathlib import Path
 
 
-SOURCE_SHA256 = "46e0dd2406cf6490535ccb087d911d1342136b628a867aeaba67e5a0404649a7"
+SOURCE_SHA256 = "9dc6f85e61aa3edfb20db6d65de255607c3753c82223cde467f8bd2a6a703eb2"
 OLD_HASH = b"c371061b19d8c7d7d6133c6a9bafe198fa944e50c1b31c9d8daa8d7f1fc2d2d6"
 NEW_HASH = b"14296df529682e1ada0a4a37f2cab5751f0951706051435394d597168f45dd8b"
-OLD_COMPARE = 0x710CEEBF  # cmp w21, #0x33b (827-byte certificate)
-NEW_COMPARE = 0x710C32BF  # cmp w21, #0x30c (780-byte certificate)
-COMPARE_FILE_OFFSET = 0x5000 + 0x65D8  # .text offset + check_block instruction
+PATCH_WORDS = {
+    0x5000 + 0x5D58: (0x710CED1F, 0x710C311F),  # cmp w8, #0x33b -> #0x30c
+    0x5000 + 0x5D90: (0x52806762, 0x52806182),  # mov w2, #0x33b -> #0x30c
+}
 
 
 def main() -> int:
@@ -34,21 +35,24 @@ def main() -> int:
         parser.error("manager certificate literal is not unique")
     if len(OLD_HASH) != len(NEW_HASH):
         parser.error("certificate literal sizes differ")
-    old_instruction = struct.pack("<I", OLD_COMPARE)
-    if raw[COMPARE_FILE_OFFSET:COMPARE_FILE_OFFSET + 4] != old_instruction:
-        parser.error("certificate length comparison is not at the audited offset")
+    for file_offset, (old_word, _) in PATCH_WORDS.items():
+        if raw[file_offset:file_offset + 4] != struct.pack("<I", old_word):
+            parser.error(f"certificate length instruction mismatch at 0x{file_offset:x}")
 
     patched = bytearray(raw)
     hash_offset = raw.index(OLD_HASH)
     patched[hash_offset:hash_offset + len(NEW_HASH)] = NEW_HASH
-    patched[COMPARE_FILE_OFFSET:COMPARE_FILE_OFFSET + 4] = struct.pack("<I", NEW_COMPARE)
+    for file_offset, (_, new_word) in PATCH_WORDS.items():
+        patched[file_offset:file_offset + 4] = struct.pack("<I", new_word)
     if len(patched) != len(raw):
         parser.error("patched module size changed")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(patched)
     print(f"source sha256: {SOURCE_SHA256}")
     print(f"patched sha256: {hashlib.sha256(patched).hexdigest()}")
-    print(f"changed offsets: 0x{hash_offset:x}, 0x{COMPARE_FILE_OFFSET:x}")
+    print("changed offsets: " + ", ".join(
+        f"0x{offset:x}" for offset in (hash_offset, *PATCH_WORDS)
+    ))
     return 0
 
 
